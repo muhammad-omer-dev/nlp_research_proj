@@ -8,17 +8,35 @@ from project_utils import (DEFAULT_LABELS, PAPER_LABELS, normalize_label, strati
 
 
 class ToyChatTokenizer:
-    """Fake tokenizer with the exact same prefix property expected of an instruct LLM."""
+    """Simple tokenizer used for offline tests."""
+
     def encode(self, text, add_special_tokens=False):
-        return [ord(x) for x in text]
+        return [ord(ch) for ch in text]
+
     def decode(self, ids, skip_special_tokens=True):
         return "".join(chr(x) for x in ids)
-    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False):
-        rendered = ''.join(f'<{m["role"]}>{m["content"]}</{m["role"]}>' for m in messages)
-        if add_generation_prompt:
-            rendered += '<assistant>'
-        return [ord(ch) for ch in rendered]
 
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=False
+    ):
+        rendered = "".join(
+            f'<{m["role"]}>{m["content"]}</{m["role"]}>'
+            for m in messages
+        )
+
+        if add_generation_prompt:
+            rendered += "<assistant>"
+
+        if tokenize:
+            return self.encode(
+                rendered,
+                add_special_tokens=False
+            )
+
+        return rendered
 
 def make_rows():
     return [dict(example_id=stable_id('toy','ur','train',i),lang='ur',split='train',
