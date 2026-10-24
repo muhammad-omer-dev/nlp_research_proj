@@ -1,0 +1,20 @@
+{
+  "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+  "seed": 42,
+  "max_length": 256,
+  "max_new_tokens": 16,
+  "train_epochs": 2,
+  "per_device_batch_size": 1,
+  "gradient_accumulation": 8,
+  "learning_rate_lora": 0.0002,
+  "learning_rate_full": 0.00002,
+  "lora_rank": 8,
+  "lora_alpha": 16,
+  "lora_dropout": 0.05,
+  "optimizer": "adafactor",
+  "max_grad_norm": 1.0,
+  "task": "sib200",
+  "english_anchor": null,
+  "paper_repo_url": "https://github.com/sameearif/Generalists-vs-Specialists",
+  "paper_topic_macro_f1": 0.8474
+}
