@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -198,6 +199,43 @@ def messages_for(text, labels, lang="ur", demonstrations=None):
     return messages
 
 
+def _checked_token_ids(values, field):
+    """Convert a single token sequence to plain ints, fail with a useful message.
+
+    Prevent strings or batched sequences from silently reaching torch.tensor.
+    """
+    if isinstance(values, Mapping):
+        # Hugging Face BatchEncoding is dictionary-like (a UserDict),
+        # but it is NOT a built-in dict. list(BatchEncoding) lists its
+        # string keys instead of its numeric input_ids values.
+        if "input_ids" not in values:
+            raise KeyError(f"{field}: tokenizer output has no input_ids key")
+        values = values["input_ids"]
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if isinstance(values, (str, bytes)):
+        raise TypeError(
+            f"{field} is a {type(values).__name__}, not numeric token IDs. "
+            "Check apply_chat_template(..., tokenize=True), reload project_utils, "
+            "and restart the notebook if the tokenizer was modified."
+        )
+    try:
+        values = list(values)
+    except TypeError as exc:
+        raise TypeError(f"{field} must be a sequence of integer token IDs") from exc
+    # Accept a batch of exactly one sequence from some tokenizer configurations.
+    if len(values) == 1 and isinstance(values[0], (list, tuple)):
+        values = list(values[0])
+    for index, value in enumerate(values):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(
+                f"{field}[{index}] is {type(value).__name__} "
+                f"({str(value)[:80]!r}), expected an integer token ID. "
+                "Check the tokenizer output and any previously imported code."
+            )
+    return values
+
+
 def encode_supervised(tokenizer, text, label, labels, lang="ur", max_length=256):
     """Chat-template aligned, assistant-only loss. Shortens INPUT TEXT, never target.
 
@@ -213,11 +251,7 @@ def encode_supervised(tokenizer, text, label, labels, lang="ur", max_length=256)
         prefix_ids = tokenizer.apply_chat_template(
             prompt, tokenize=True, add_generation_prompt=True
         )
-        if isinstance(prefix_ids, dict):
-            prefix_ids = prefix_ids["input_ids"]
-        if hasattr(prefix_ids, "tolist"):
-            prefix_ids = prefix_ids.tolist()
-        prefix_ids = list(prefix_ids)
+        prefix_ids = _checked_token_ids(prefix_ids, "chat prompt input_ids")
 
         prefix_text = tokenizer.apply_chat_template(
             prompt, tokenize=False, add_generation_prompt=True
@@ -242,15 +276,17 @@ def encode_supervised(tokenizer, text, label, labels, lang="ur", max_length=256)
         # No extra BOS/EOS: chat templates already provide end-of-turn tokens.
         # Concatenating independently tokenized pieces preserves the generation
         # prompt prefix and allows a precise assistant-only loss mask.
-        suffix_ids = tokenizer.encode(suffix_text, add_special_tokens=False)
-        if hasattr(suffix_ids, "tolist"):
-            suffix_ids = suffix_ids.tolist()
-        suffix_ids = list(suffix_ids)
+        suffix_ids = _checked_token_ids(
+            tokenizer.encode(suffix_text, add_special_tokens=False),
+            "assistant target input_ids"
+        )
         if not suffix_ids:
             raise ValueError("Chat template generated no response tokens")
         return prefix_ids, prefix_ids + suffix_ids
 
-    original_tokens = tokenizer.encode(str(text), add_special_tokens=False)
+    original_tokens = _checked_token_ids(
+        tokenizer.encode(str(text), add_special_tokens=False), "original source input_ids"
+    )
     prefix, full = encode_text(str(text))
     kept = len(original_tokens)
     if len(full) > max_length:
@@ -282,12 +318,19 @@ def supervised_collator(tokenizer):
         width = max(len(x["input_ids"]) for x in batch)
         pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         ids, attn, labs = [], [], []
-        for b in batch:
-            extra = width - len(b["input_ids"])
-            ids.append(b["input_ids"] + [pad] * extra)
-            attn.append(b["attention_mask"] + [0] * extra)
-            labs.append(b["labels"] + [-100] * extra)
-        return {"input_ids": torch.tensor(ids), "attention_mask": torch.tensor(attn), "labels": torch.tensor(labs)}
+        for row_idx, b in enumerate(batch):
+            item_ids = _checked_token_ids(b["input_ids"], f"batch[{row_idx}].input_ids")
+            item_attn = _checked_token_ids(b["attention_mask"], f"batch[{row_idx}].attention_mask")
+            item_labels = _checked_token_ids(b["labels"], f"batch[{row_idx}].labels")
+            if not (len(item_ids) == len(item_attn) == len(item_labels)):
+                raise ValueError(f"batch[{row_idx}]: input_ids, attention_mask and labels lengths differ")
+            extra = width - len(item_ids)
+            ids.append(item_ids + [pad] * extra)
+            attn.append(item_attn + [0] * extra)
+            labs.append(item_labels + [-100] * extra)
+        return {"input_ids": torch.tensor(ids, dtype=torch.long),
+                "attention_mask": torch.tensor(attn, dtype=torch.long),
+                "labels": torch.tensor(labs, dtype=torch.long)}
     return collate
 
 
