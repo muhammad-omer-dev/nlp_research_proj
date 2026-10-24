@@ -32,3 +32,9 @@
 - Validate overlap removal and possible near duplicates in the original headlines source.
 
 **Conclusion:** This is an implementation-complete experimental starter and validated offline notebook suite, **not** evidence that model training has already succeeded on Kaggle or Colab. GPU measurements and scientific results must be produced by executing the experiments.
+
+## GitHub bootstrap update (2026-10-24)
+
+All 13 notebooks now load the project from `https://github.com/muhammad-omer-dev/nlp_research_proj.git` with a clone-if-missing first code cell. Existing clones are reused; optional fast-forward with `PULL_LATEST=True`. The known repository nesting is `nlp_research_proj/Urdu_Qwen_Research_Notebooks`. The notebook generators were updated to preserve this first cell when notebooks are rebuilt.
+
+This update was tested for notebook syntax and with an isolated local `git` repository, but Kaggle/Colab network/GPU training was not run in this container.

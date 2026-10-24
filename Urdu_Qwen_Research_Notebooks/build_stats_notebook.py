@@ -7,15 +7,55 @@ nb=nbf.v4.new_notebook(cells=[
 md('''# 12 — Uncertainty, paired model comparison, and English retention
 
 **Purpose:** Compare two complete model runs on exactly the same test items. Bootstrap confidence intervals describe uncertainty from limited test samples, not randomness from retraining. For robust conclusions, also use several training seeds.'''),
-cd('''from pathlib import Path
-import os,sys
-candidates=[Path.cwd(),Path.cwd().parent,Path('/kaggle/working/Urdu_Qwen_Research_Notebooks'),Path('/content/Urdu_Qwen_Research_Notebooks')]
-ROOT=next((p for p in candidates if (p/'project_utils.py').exists()),None)
-if ROOT is None: raise FileNotFoundError('Extract the whole project ZIP; see README.')
-os.chdir(ROOT);sys.path.insert(0,str(ROOT))
+cd('''# GitHub setup: run this as the FIRST code cell in Kaggle or Colab.
+# This clones the source code only; GPU checkpoints/results need separate storage.
+from pathlib import Path
+import os, sys, subprocess
+
+REPO_URL = "https://github.com/muhammad-omer-dev/nlp_research_proj.git"
+REPO_FOLDER = "nlp_research_proj"
+PROJECT_FOLDER = "Urdu_Qwen_Research_Notebooks"
+PULL_LATEST = False  # True: update an existing clean clone from GitHub
+
+if Path("/kaggle/working").is_dir():
+    workspace = Path("/kaggle/working")
+elif Path("/content").is_dir():
+    workspace = Path("/content")
+else:
+    workspace = Path.cwd()
+
+repo_dir = workspace / REPO_FOLDER
+project_dir = repo_dir / PROJECT_FOLDER
+
+# Local development support: use the existing source folder outside Kaggle/Colab.
+local_project = next((p for p in [Path.cwd(), *Path.cwd().parents]
+                      if (p / "project_utils.py").is_file()), None)
+if local_project is not None and not (Path("/kaggle/working").is_dir() or Path("/content").is_dir()):
+    ROOT = local_project
+else:
+    if not repo_dir.exists():
+        print("Cloning:", REPO_URL)
+        subprocess.check_call(["git", "clone", "--depth", "1", REPO_URL, str(repo_dir)])
+    elif PULL_LATEST:
+        # Only fast-forward; protects existing local changes from being overwritten.
+        subprocess.check_call(["git", "-C", str(repo_dir), "pull", "--ff-only"])
+    else:
+        print("Using existing clone:", repo_dir)
+
+    ROOT = project_dir
+
+if not (ROOT / "project_utils.py").is_file():
+    raise FileNotFoundError(
+        f"Cannot find project_utils.py at {ROOT}. Confirm the GitHub folder name."
+    )
+
+os.chdir(ROOT)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from project_utils import *
-import pandas as pd, numpy as np, matplotlib.pyplot as plt
-from sklearn.metrics import f1_score'''),
+folders()
+print("Project loaded from:", ROOT)
+'''),
 md('''## A. Paired bootstrap for LoRA versus full
 
 Supply two complete prediction files from notebook 05 and make sure their metadata refer to the same dataset, split, and language. Invalid generated labels must remain wrong answers.'''),

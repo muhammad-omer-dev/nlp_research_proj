@@ -27,36 +27,72 @@
 | 11 | `11_paper8_original_headlines.ipynb` | Build separate eight-class training + validation from upstream headlines; exclude published test data | No |
 | 12 | `12_uncertainty_and_retention.ipynb` | Paired bootstrap differences, English retention, confusion matrix | No |
 
-### Do this first
+### Do this first: load code from GitHub
 
-1. Extract **the entire ZIP**, keeping `project_utils.py`, `config.json`, `requirements.txt`, and the `notebooks/` folder together. Individual notebooks depend on `project_utils.py`.
-2. Run notebook **00**, then **01**.
-3. In notebook 00, set `INSTALL_PACKAGES=True` once if the required packages are missing and restart the Python kernel after the install. The project intentionally **does not reinstall PyTorch**, to preserve the cloud GPU-compatible version.
-4. Run the optional **2-step GPU pilot** in notebook 00 after preprocessing. Try **LoRA first**, then full. This is only for compatibility and rough timing, not paper results.
-5. Then run **02 → 03 → 04 → 05 → 06 → 07**. Other notebooks are optional or for published comparisons.
-6. After validation and hyperparameter selection, change `SPLIT='test'` in notebooks 02/05/06 and run inference/evaluation on the held-out test exactly once for your final selected configurations.
+The notebooks now **clone this repository automatically in their first code cell**:
 
-### Kaggle setup
-
-- Create a GPU notebook and select **T4** if available. Enable **Internet** for initial model/dataset download. Free accelerator time and allocation are not guaranteed.
-- Upload the ZIP as a Kaggle Dataset or with notebook inputs, unzip it to `/kaggle/working/Urdu_Qwen_Research_Notebooks/` so `project_utils.py` is in that folder.
-- Example in a Kaggle cell (edit the input ZIP path to match your upload):
-
-```python
-import zipfile
-with zipfile.ZipFile('/kaggle/input/YOUR-UPLOAD/Urdu_Qwen_Research_Notebooks.zip') as z:
-    z.extractall('/kaggle/working')
+```bash
+git clone https://github.com/muhammad-omer-dev/nlp_research_proj.git
 ```
 
-- Open a notebook from the extracted `notebooks/` folder, or import its cells into a Kaggle notebook. `PROJECT_ROOT` auto-discovery searches common paths.
-- After each completed training run, **save or version the outputs** as a Kaggle Dataset or download the run folder. `/kaggle/working` is not permanent across unrelated sessions.
+The GitHub repository contains the project inside a nested folder:
 
-### Google Colab setup
+```text
+nlp_research_proj/
+  Urdu_Qwen_Research_Notebooks/
+    project_utils.py
+    config.json
+    requirements.txt
+    notebooks/
+    tests/
+```
 
-- Choose Runtime → Change runtime type → T4 GPU (when available).
-- Upload ZIP to `/content/`, unzip it. The notebooks search `/content/Urdu_Qwen_Research_Notebooks`.
-- To preserve model checkpoints, copy the output folder to Drive or another persistent storage location after each successful run. Colab runtime storage disappears when the session ends.
-- The first model download needs internet and may take time. Always verify your GPU with notebook 00.
+**Kaggle:** Enable **Internet** in Notebook Settings. The first code cell clones into
+`/kaggle/working/nlp_research_proj/Urdu_Qwen_Research_Notebooks`.
+Select a GPU such as T4 for the training notebooks. Run the first code cell at the
+start of each notebook. You do **not** need to upload the ZIP or Python files again.
+
+**Google Colab:** Enable GPU from Runtime → Change runtime type; the first code cell
+clones into `/content/nlp_research_proj/Urdu_Qwen_Research_Notebooks`.
+You do **not** need to upload the project files again.
+
+- An existing cloned repository is reused instead of cloned twice.
+- If you push changed source code to GitHub **during the same live session**, set
+  `PULL_LATEST = True` in the first code cell to fast-forward an existing clean clone.
+- Restarting a Kaggle/Colab runtime clears its temporary filesystem. The next run
+  clones again automatically, provided Internet is enabled.
+- Cloning GitHub does **not** restore previous GPU checkpoints, training data files,
+  saved predictions, or metrics: `data/` and `outputs/` are runtime artifacts. Copy
+  them to Google Drive, Kaggle Dataset/Outputs, or another persistent location after
+  a session. Never push large model checkpoints to normal GitHub Git history.
+- A Git clone requires a public repository or suitable authentication. The supplied
+  GitHub repository is currently public.
+
+### Recommended notebook order
+
+1. Run notebook **00**, then notebook **01** to prepare the dataset.
+2. In notebook 00, set `INSTALL_PACKAGES=True` once if missing packages are found;
+   restart the kernel after installation.
+3. After preprocessing, run the optional GPU pilot in notebook 00; test LoRA first,
+   then full tuning to check memory and timing.
+4. Then run **02 → 03 → 04 → 05 → 06 → 07**. Other notebooks are optional.
+5. Set `SPLIT='test'` only after finishing validation and model selection.
+
+**Notebook setup example (already included as the first code cell):**
+
+```python
+from pathlib import Path
+import subprocess
+
+repo_dir = Path('/kaggle/working/nlp_research_proj')  # use /content on Colab
+if not repo_dir.exists():
+    subprocess.check_call([
+        'git', 'clone', '--depth', '1',
+        'https://github.com/muhammad-omer-dev/nlp_research_proj.git',
+        str(repo_dir)
+    ])
+ROOT = repo_dir / 'Urdu_Qwen_Research_Notebooks'
+```
 
 ## 2. Fair experimental design
 

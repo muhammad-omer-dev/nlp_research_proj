@@ -9,17 +9,55 @@ def md(s): return nbf.v4.new_markdown_cell(s.strip())
 def code(s): return nbf.v4.new_code_cell(s.strip())
 def make(filename, name, goal, cells):
     preface = [md(f'# {name}\n\n**Purpose:** {goal}\n\n**Platform:** Kaggle or Colab (Python + GPU for model stages). Never use held-out test data for model selection.'),
-    code('''from pathlib import Path
-import os, sys
-CANDIDATES = [Path.cwd(), Path.cwd().parent, Path('/kaggle/working/Urdu_Qwen_Research_Notebooks'), Path('/content/Urdu_Qwen_Research_Notebooks')]
-ROOT = next((p for p in CANDIDATES if (p / 'project_utils.py').exists()), None)
-if ROOT is None:
-    raise FileNotFoundError('Unzip the entire project folder into /kaggle/working/ or /content/, then run this notebook. See README.md.')
+    code('''# GitHub setup: run this as the FIRST code cell in Kaggle or Colab.
+# This clones the source code only; GPU checkpoints/results need separate storage.
+from pathlib import Path
+import os, sys, subprocess
+
+REPO_URL = "https://github.com/muhammad-omer-dev/nlp_research_proj.git"
+REPO_FOLDER = "nlp_research_proj"
+PROJECT_FOLDER = "Urdu_Qwen_Research_Notebooks"
+PULL_LATEST = False  # True: update an existing clean clone from GitHub
+
+if Path("/kaggle/working").is_dir():
+    workspace = Path("/kaggle/working")
+elif Path("/content").is_dir():
+    workspace = Path("/content")
+else:
+    workspace = Path.cwd()
+
+repo_dir = workspace / REPO_FOLDER
+project_dir = repo_dir / PROJECT_FOLDER
+
+# Local development support: use the existing source folder outside Kaggle/Colab.
+local_project = next((p for p in [Path.cwd(), *Path.cwd().parents]
+                      if (p / "project_utils.py").is_file()), None)
+if local_project is not None and not (Path("/kaggle/working").is_dir() or Path("/content").is_dir()):
+    ROOT = local_project
+else:
+    if not repo_dir.exists():
+        print("Cloning:", REPO_URL)
+        subprocess.check_call(["git", "clone", "--depth", "1", REPO_URL, str(repo_dir)])
+    elif PULL_LATEST:
+        # Only fast-forward; protects existing local changes from being overwritten.
+        subprocess.check_call(["git", "-C", str(repo_dir), "pull", "--ff-only"])
+    else:
+        print("Using existing clone:", repo_dir)
+
+    ROOT = project_dir
+
+if not (ROOT / "project_utils.py").is_file():
+    raise FileNotFoundError(
+        f"Cannot find project_utils.py at {ROOT}. Confirm the GitHub folder name."
+    )
+
 os.chdir(ROOT)
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from project_utils import *
 folders()
-print('Project folder:', ROOT)''')]
+print("Project loaded from:", ROOT)
+''')]
     nb = nbf.v4.new_notebook(cells=preface+cells, metadata={'kernelspec': {'display_name':'Python 3','language':'python','name':'python3'}, 'language_info':{'name':'python'}})
     nbf.validate(nb)
     nbf.write(nb, N/filename)
