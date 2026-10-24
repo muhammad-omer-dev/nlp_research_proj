@@ -456,7 +456,7 @@ def train_run(method, task, size, seed, run_name=None, lang="ur", rank=8,
     validation = None
     if len(dataset) == 0: raise ValueError("No training examples")
     args = TrainingArguments(
-        output_dir=str(out), overwrite_output_dir=True, num_train_epochs=epochs or c["train_epochs"],
+        output_dir=str(out), num_train_epochs=epochs or c["train_epochs"],
         max_steps=max_steps if max_steps is not None else -1,
         per_device_train_batch_size=c["per_device_batch_size"],
         per_device_eval_batch_size=1, gradient_accumulation_steps=c["gradient_accumulation"],
