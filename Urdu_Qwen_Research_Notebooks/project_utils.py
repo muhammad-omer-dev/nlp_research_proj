@@ -362,8 +362,9 @@ def training_arguments_kwargs(c, method, out, seed, epochs, max_steps, pilot, ha
                               training_args_class=None):
     """Build training arguments for Transformers 4.x or 5.x, with strict API checking.
 
-    Version 5 removed overwrite_output_dir and replaced group_by_length with
-    train_sampling_strategy. Never silently discard an unsupported argument.
+    Version 5 changed overwrite_output_dir, sampling, and warmup options.
+    Preserve warmup as a 3% ratio across supported versions; do not silently
+    drop options if an API signature changes.
     """
     import inspect
     if training_args_class is None:
@@ -392,16 +393,19 @@ def training_arguments_kwargs(c, method, out, seed, epochs, max_steps, pilot, ha
         "seed": seed,
         "data_seed": seed,
         "lr_scheduler_type": "linear",
-        "warmup_ratio": 0.03,
         "ddp_find_unused_parameters": False,
     }
+    # Transformers 4.x uses warmup_ratio. Newer Transformers 5.x releases
+    # removed it and accept a fractional warmup_steps (e.g., 0.03 = 3%).
+    # Keep the *same scheduler behavior* rather than skipping warmup.
     if "warmup_ratio" in supported:
         options["warmup_ratio"] = 0.03
     elif "warmup_steps" in supported:
         options["warmup_steps"] = 0.03
     else:
         raise RuntimeError(
-            "TrainingArguments supports neither warmup option"
+            "TrainingArguments has neither warmup_ratio nor warmup_steps; "
+            "check the installed Transformers version."
         )
     if "eval_strategy" in supported:
         options["eval_strategy"] = "no"

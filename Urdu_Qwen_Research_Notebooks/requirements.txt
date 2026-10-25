@@ -1,15 +1,20 @@
-# Tested by static checks only here; actual notebook GPU installation is required.
-# Use the preinstalled CUDA-compatible PyTorch in Kaggle or Colab.
+# Urdu Qwen research: ONE tested-API target for Kaggle/Colab (Python 3.10–3.12).
+# KEEP the platform's CUDA-enabled torch; do NOT pin or reinstall torch here.
+# Do NOT install latest transformers/peft independently; they change APIs.
+# Hugging Face training stack (exact pins):
 transformers==4.51.3
 peft==0.15.2
 accelerate==1.6.0
 datasets==3.5.0
-huggingface_hub>=0.30,<1
-safetensors>=0.5,<1
-scikit-learn>=1.3,<2
-pandas>=2.0,<3
-numpy>=1.24,<3
-matplotlib>=3.7,<4
-psutil>=5.9
-ipywidgets>=8
-nbformat>=5
+tokenizers==0.21.1
+huggingface_hub==0.30.2
+safetensors==0.5.3
+# Analysis, tests and notebook libraries:
+scikit-learn==1.6.1
+pandas==2.2.3
+numpy==1.26.4
+matplotlib==3.10.1
+psutil==7.0.0
+ipywidgets==8.1.6
+nbformat==5.10.4
+pytest==8.3.5

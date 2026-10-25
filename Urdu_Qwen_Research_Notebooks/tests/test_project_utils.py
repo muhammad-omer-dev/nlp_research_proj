@@ -209,6 +209,8 @@ def test_training_arguments_transformers4_compatibility(tmp_path):
     v4 = _fake_class_with_signature(opts | {'eval_strategy', 'group_by_length', 'overwrite_output_dir'})
     result = training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, True, v4)
     assert result['group_by_length'] is False
+    assert result['warmup_ratio'] == 0.03
+    assert 'warmup_steps' not in result
     assert result['eval_strategy'] == 'no'
     assert result['fp16'] is True
     assert result['save_strategy'] == 'no'
@@ -219,9 +221,11 @@ def test_training_arguments_transformers4_compatibility(tmp_path):
 
 def test_training_arguments_transformers5_compatibility(tmp_path):
     config, opts = _supported_options()
-    v5 = _fake_class_with_signature(opts | {'eval_strategy', 'train_sampling_strategy'})
+    v5 = _fake_class_with_signature((opts - {'warmup_ratio'}) | {'eval_strategy', 'train_sampling_strategy', 'warmup_steps'})
     result = training_arguments_kwargs(config, 'full', tmp_path, 7, None, None, False, False, v5)
     assert result['train_sampling_strategy'] == 'random'
+    assert result['warmup_steps'] == 0.03
+    assert 'warmup_ratio' not in result
     assert 'group_by_length' not in result
     assert 'overwrite_output_dir' not in result
     assert result['learning_rate'] == 2e-5
@@ -239,10 +243,18 @@ def test_training_arguments_older_eval_strategy_name(tmp_path):
     assert 'eval_strategy' not in result
 
 
-def test_training_arguments_unknown_api_fails_early(tmp_path):
+def test_training_arguments_warmup_steps_fallback_only(tmp_path):
+    config, opts = _supported_options()
+    api = _fake_class_with_signature((opts - {'warmup_ratio'}) | {'eval_strategy', 'train_sampling_strategy', 'warmup_steps'})
+    result = training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, False, api)
+    assert result['warmup_steps'] == 0.03
+    assert 'warmup_ratio' not in result
+
+
+def test_training_arguments_neither_warmup_api_fails_early(tmp_path):
     config, opts = _supported_options()
     api = _fake_class_with_signature((opts - {'warmup_ratio'}) | {'eval_strategy', 'train_sampling_strategy'})
-    with pytest.raises(RuntimeError, match='warmup_ratio'):
+    with pytest.raises(RuntimeError, match='neither warmup_ratio nor warmup_steps'):
         training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, False, api)
 
 
