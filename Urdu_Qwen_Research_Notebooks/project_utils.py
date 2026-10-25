@@ -327,12 +327,27 @@ def supervised_collator(tokenizer):
 
 
 
-def load_model(model_id, adapter_path=None, train_mode=False):
+def model_load_dtype(torch_module, train_mode=False, training_method=None):
+    """FP32 trainable base weights are required when Trainer uses FP16 AMP.
+
+    LoRA freezes the original base weights, so keeping its base in FP16 saves VRAM.
+    Full fine-tuning updates the base weights, so loading those weights in FP16
+    would create FP16 gradients that GradScaler refuses to unscale.
+    """
+    if training_method not in (None, "lora", "full"):
+        raise ValueError(f"Unknown training method: {training_method}")
+    if train_mode and training_method == "full":
+        return torch_module.float32
+    return torch_module.float16 if torch_module.cuda.is_available() else torch_module.float32
+
+
+def load_model(model_id, adapter_path=None, train_mode=False, training_method=None):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     if tokenizer.pad_token_id is None: tokenizer.pad_token = tokenizer.eos_token
-    kw = {"dtype": torch.float16 if torch.cuda.is_available() else torch.float32}
+    dtype = model_load_dtype(torch, train_mode=train_mode, training_method=training_method)
+    kw = {"dtype": dtype}
     model = AutoModelForCausalLM.from_pretrained(model_id, **kw)
     if adapter_path:
         from peft import PeftModel
@@ -534,7 +549,18 @@ def train_run(method, task, size, seed, run_name=None, lang="ur", rank=8,
             resume_checkpoint = existing_checkpoints[-1]
     out.mkdir(parents=True,exist_ok=True)
     if not previous.exists(): write_json(previous,spec)
-    model, tokenizer = load_model(model_id, train_mode=True)
+    model, tokenizer = load_model(model_id, train_mode=True, training_method=method)
+    if method == "full":
+        # With fp16=True, Accelerate's GradScaler expects FP32 trainable weights
+        # and FP32 gradients. Autocast will still use FP16 for supported operations.
+        wrong_dtypes = sorted({str(p.dtype) for p in model.parameters()
+                               if p.requires_grad and p.dtype != torch.float32})
+        if wrong_dtypes:
+            raise RuntimeError(
+                "Full fine-tuning needs FP32 trainable weights when fp16=True; "
+                f"found trainable dtypes: {wrong_dtypes}. "
+                "Do not cast the full model to .half()."
+            )
     model.config.use_cache = False
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     if method == "lora":
