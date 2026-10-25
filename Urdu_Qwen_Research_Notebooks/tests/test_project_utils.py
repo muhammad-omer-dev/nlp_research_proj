@@ -17,7 +17,7 @@ class ToyChatTokenizer:
         rendered = ''.join(f'<{m["role"]}>{m["content"]}</{m["role"]}>' for m in messages)
         if add_generation_prompt:
             rendered += '<assistant>'
-        return [ord(ch) for ch in rendered]
+        return [ord(ch) for ch in rendered] if tokenize else rendered
 
 
 def make_rows():
@@ -59,6 +59,39 @@ def test_cross_split_id_leakage():
     b=dict(a[0]);b['example_id']='new';b['split']='test'; b['text']='different'
     assert any('index_id across splits' in x for x in validate_split(a+[b],['politics','sports']))
 
+
+
+class BoundaryMergingTokenizer(ToyChatTokenizer):
+    """Simulate a tokenizer that merges a token across the prompt/answer boundary."""
+    def encode(self, text, add_special_tokens=False):
+        target = '<assistant>sports'
+        if target not in text:
+            return super().encode(text, add_special_tokens=add_special_tokens)
+        before, after = text.split(target, 1)
+        return super().encode(before) + [999999] + super().encode(after)
+
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False):
+        text = super().apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt
+        )
+        return self.encode(text, add_special_tokens=False) if tokenize else text
+
+
+def test_bpe_boundary_merging_preserves_inference_prompt_and_answer_mask():
+    tk = BoundaryMergingTokenizer()
+    prompt = messages_for('urdu test', ['sports', 'politics'], 'ur')
+    prefix = tk.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True)
+    complete = tk.apply_chat_template(
+        prompt + [{'role': 'assistant', 'content': 'sports'}],
+        tokenize=True, add_generation_prompt=False
+    )
+    assert complete[:len(prefix)] != prefix  # Previous implementation crashed here.
+    encoded = encode_supervised(tk, 'urdu test', 'sports', ['sports', 'politics'], 'ur', 2048)
+    assert encoded['input_ids'][:len(prefix)] == prefix
+    assert encoded['labels'][:len(prefix)] == [-100] * len(prefix)
+    supervised = ''.join(chr(x) for x in encoded['labels'] if x != -100)
+    assert supervised.startswith('sports') and supervised.endswith('</assistant>')
+    assert len(encoded['input_ids']) == len(encoded['labels'])
 
 def test_supervision_masks_prompt():
     tokenizer=ToyChatTokenizer()
@@ -135,3 +168,93 @@ def test_training_truncates_source_but_not_answer():
     assert item['source_truncated'] and item['removed_source_tokens']>0
     target=[i for i in item['labels'] if i!=-100]
     assert ''.join(chr(x) for x in target).startswith('sports')
+
+
+# The following tests simulate both Transformers 4 and 5 constructor signatures.
+# They do not need a network connection, the real Qwen model, or a GPU.
+from project_utils import training_arguments_kwargs, trainer_processing_arg
+import inspect
+
+
+def _fake_class_with_signature(keys):
+    class Fake:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+    Fake.__signature__ = inspect.Signature([
+        inspect.Parameter(k, inspect.Parameter.KEYWORD_ONLY)
+        for k in keys
+    ])
+    return Fake
+
+
+def _supported_options():
+    config = {
+        'train_epochs':2, 'per_device_batch_size':1, 'gradient_accumulation':8,
+        'learning_rate_lora':2e-4, 'learning_rate_full':2e-5,
+        'optimizer':'adafactor', 'max_grad_norm':1.0
+    }
+    opts = {
+        'output_dir', 'num_train_epochs', 'max_steps', 'per_device_train_batch_size',
+        'per_device_eval_batch_size', 'gradient_accumulation_steps', 'learning_rate',
+        'optim','max_grad_norm','fp16','bf16','gradient_checkpointing',
+        'save_strategy','save_steps','save_total_limit','logging_steps',
+        'dataloader_num_workers','remove_unused_columns','report_to','seed',
+        'data_seed','lr_scheduler_type','warmup_ratio','ddp_find_unused_parameters'
+    }
+    return config, opts
+
+
+def test_training_arguments_transformers4_compatibility(tmp_path):
+    config, opts = _supported_options()
+    v4 = _fake_class_with_signature(opts | {'eval_strategy', 'group_by_length', 'overwrite_output_dir'})
+    result = training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, True, v4)
+    assert result['group_by_length'] is False
+    assert result['eval_strategy'] == 'no'
+    assert result['fp16'] is True
+    assert result['save_strategy'] == 'no'
+    assert result['max_steps'] == 2
+    assert 'overwrite_output_dir' not in result
+    assert v4(**result).options == result
+
+
+def test_training_arguments_transformers5_compatibility(tmp_path):
+    config, opts = _supported_options()
+    v5 = _fake_class_with_signature(opts | {'eval_strategy', 'train_sampling_strategy'})
+    result = training_arguments_kwargs(config, 'full', tmp_path, 7, None, None, False, False, v5)
+    assert result['train_sampling_strategy'] == 'random'
+    assert 'group_by_length' not in result
+    assert 'overwrite_output_dir' not in result
+    assert result['learning_rate'] == 2e-5
+    assert result['max_steps'] == -1
+    assert result['save_strategy'] == 'steps'
+    assert result['fp16'] is False
+    assert v5(**result).options == result
+
+
+def test_training_arguments_older_eval_strategy_name(tmp_path):
+    config, opts = _supported_options()
+    old = _fake_class_with_signature(opts | {'evaluation_strategy', 'group_by_length'})
+    result = training_arguments_kwargs(config, 'lora', tmp_path, 3, None, 2, True, False, old)
+    assert result['evaluation_strategy'] == 'no'
+    assert 'eval_strategy' not in result
+
+
+def test_training_arguments_unknown_api_fails_early(tmp_path):
+    config, opts = _supported_options()
+    api = _fake_class_with_signature((opts - {'warmup_ratio'}) | {'eval_strategy', 'train_sampling_strategy'})
+    with pytest.raises(RuntimeError, match='warmup_ratio'):
+        training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, False, api)
+
+
+def test_trainer_constructor_v4_v5():
+    v4 = _fake_class_with_signature(['model','args','train_dataset','tokenizer'])
+    v5 = _fake_class_with_signature(['model','args','train_dataset','processing_class'])
+    marker=object()
+    assert trainer_processing_arg(v4,marker) == {'tokenizer':marker}
+    assert trainer_processing_arg(v5,marker) == {'processing_class':marker}
+
+
+def test_trainer_constructor_unknown_raises():
+    impossible = _fake_class_with_signature(['model'])
+    with pytest.raises(RuntimeError, match='processing_class'):
+        trainer_processing_arg(impossible,None)
