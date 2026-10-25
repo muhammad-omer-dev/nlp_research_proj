@@ -395,6 +395,14 @@ def training_arguments_kwargs(c, method, out, seed, epochs, max_steps, pilot, ha
         "warmup_ratio": 0.03,
         "ddp_find_unused_parameters": False,
     }
+    if "warmup_ratio" in supported:
+        options["warmup_ratio"] = 0.03
+    elif "warmup_steps" in supported:
+        options["warmup_steps"] = 0.03
+    else:
+        raise RuntimeError(
+            "TrainingArguments supports neither warmup option"
+        )
     if "eval_strategy" in supported:
         options["eval_strategy"] = "no"
     elif "evaluation_strategy" in supported:
