@@ -1,9 +1,9 @@
+# Large model checkpoints and generated results are not for normal Git.
+outputs/
+data/sib200/
+data/external/
 __pycache__/
 .pytest_cache/
+*.pyc
 .ipynb_checkpoints/
-outputs/checkpoints/
-outputs/pilots/
-outputs/predictions/
-data/*/
-!data/.gitkeep
-*.zip
+.env

@@ -170,10 +170,13 @@ def test_training_truncates_source_but_not_answer():
     assert ''.join(chr(x) for x in target).startswith('sports')
 
 
-# The following tests simulate both Transformers 4 and 5 constructor signatures.
-# They do not need a network connection, the real Qwen model, or a GPU.
-from project_utils import training_arguments_kwargs, trainer_processing_arg
+# Offline checks for the exact 2026 Kaggle-native architecture (Transformers 5).
+from project_utils import (
+    training_arguments_kwargs, trainer_processing_arg, numeric_token_ids,
+    supervised_collator, run_generation,
+)
 import inspect
+import torch
 
 
 def _fake_class_with_signature(keys):
@@ -182,91 +185,147 @@ def _fake_class_with_signature(keys):
             self.options = kwargs
     Fake.__signature__ = inspect.Signature([
         inspect.Parameter(k, inspect.Parameter.KEYWORD_ONLY)
-        for k in keys
+        for k in sorted(keys)
     ])
     return Fake
 
 
 def _supported_options():
     config = {
-        'train_epochs':2, 'per_device_batch_size':1, 'gradient_accumulation':8,
-        'learning_rate_lora':2e-4, 'learning_rate_full':2e-5,
-        'optimizer':'adafactor', 'max_grad_norm':1.0
+        'train_epochs': 2, 'per_device_batch_size': 1,
+        'gradient_accumulation': 8,
+        'learning_rate_lora': 2e-4, 'learning_rate_full': 2e-5,
+        'optimizer': 'adafactor', 'max_grad_norm': 1.0,
     }
     opts = {
         'output_dir', 'num_train_epochs', 'max_steps', 'per_device_train_batch_size',
         'per_device_eval_batch_size', 'gradient_accumulation_steps', 'learning_rate',
-        'optim','max_grad_norm','fp16','bf16','gradient_checkpointing',
-        'save_strategy','save_steps','save_total_limit','logging_steps',
-        'dataloader_num_workers','remove_unused_columns','report_to','seed',
-        'data_seed','lr_scheduler_type','warmup_ratio','ddp_find_unused_parameters'
+        'optim', 'max_grad_norm', 'fp16', 'bf16', 'gradient_checkpointing',
+        'gradient_checkpointing_kwargs', 'save_strategy', 'save_steps',
+        'save_total_limit', 'logging_steps', 'dataloader_num_workers',
+        'remove_unused_columns', 'report_to', 'seed', 'data_seed',
+        'lr_scheduler_type', 'warmup_steps', 'eval_strategy',
+        'train_sampling_strategy', 'ddp_find_unused_parameters',
     }
     return config, opts
 
 
-def test_training_arguments_transformers4_compatibility(tmp_path):
+def test_native5_training_arguments_lora(tmp_path):
     config, opts = _supported_options()
-    v4 = _fake_class_with_signature(opts | {'eval_strategy', 'group_by_length', 'overwrite_output_dir'})
-    result = training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, True, v4)
-    assert result['group_by_length'] is False
-    assert result['warmup_ratio'] == 0.03
-    assert 'warmup_steps' not in result
-    assert result['eval_strategy'] == 'no'
+    version5 = _fake_class_with_signature(opts)
+    result = training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, True, version5)
+    assert result['train_sampling_strategy'] == 'random'
+    assert result['warmup_steps'] == 0.03
+    assert result['gradient_checkpointing_kwargs'] == {'use_reentrant': False}
     assert result['fp16'] is True
     assert result['save_strategy'] == 'no'
     assert result['max_steps'] == 2
-    assert 'overwrite_output_dir' not in result
-    assert v4(**result).options == result
+    assert not {'overwrite_output_dir', 'warmup_ratio', 'group_by_length', 'evaluation_strategy'} & set(result)
+    assert version5(**result).options == result
 
 
-def test_training_arguments_transformers5_compatibility(tmp_path):
+def test_native5_training_arguments_full(tmp_path):
     config, opts = _supported_options()
-    v5 = _fake_class_with_signature((opts - {'warmup_ratio'}) | {'eval_strategy', 'train_sampling_strategy', 'warmup_steps'})
-    result = training_arguments_kwargs(config, 'full', tmp_path, 7, None, None, False, False, v5)
-    assert result['train_sampling_strategy'] == 'random'
-    assert result['warmup_steps'] == 0.03
-    assert 'warmup_ratio' not in result
-    assert 'group_by_length' not in result
-    assert 'overwrite_output_dir' not in result
+    version5 = _fake_class_with_signature(opts)
+    result = training_arguments_kwargs(config, 'full', tmp_path, 42, None, None, False, False, version5)
     assert result['learning_rate'] == 2e-5
-    assert result['max_steps'] == -1
-    assert result['save_strategy'] == 'steps'
     assert result['fp16'] is False
-    assert v5(**result).options == result
+    assert result['save_strategy'] == 'steps'
+    assert result['max_steps'] == -1
+    assert version5(**result).options == result
 
 
-def test_training_arguments_older_eval_strategy_name(tmp_path):
+def test_native5_api_mismatch_fails_before_training(tmp_path):
     config, opts = _supported_options()
-    old = _fake_class_with_signature(opts | {'evaluation_strategy', 'group_by_length'})
-    result = training_arguments_kwargs(config, 'lora', tmp_path, 3, None, 2, True, False, old)
-    assert result['evaluation_strategy'] == 'no'
-    assert 'eval_strategy' not in result
+    version4 = _fake_class_with_signature(opts - {'train_sampling_strategy'} | {'group_by_length'})
+    with pytest.raises(RuntimeError, match='train_sampling_strategy'):
+        training_arguments_kwargs(config,'lora',tmp_path,42,None,2,True,False,version4)
 
 
-def test_training_arguments_warmup_steps_fallback_only(tmp_path):
+def test_unknown_method_fails(tmp_path):
     config, opts = _supported_options()
-    api = _fake_class_with_signature((opts - {'warmup_ratio'}) | {'eval_strategy', 'train_sampling_strategy', 'warmup_steps'})
-    result = training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, False, api)
-    assert result['warmup_steps'] == 0.03
-    assert 'warmup_ratio' not in result
+    version5 = _fake_class_with_signature(opts)
+    with pytest.raises(ValueError, match='Unknown training method'):
+        training_arguments_kwargs(config, 'test', tmp_path, 42, None, 2, True, False, version5)
 
 
-def test_training_arguments_neither_warmup_api_fails_early(tmp_path):
-    config, opts = _supported_options()
-    api = _fake_class_with_signature((opts - {'warmup_ratio'}) | {'eval_strategy', 'train_sampling_strategy'})
-    with pytest.raises(RuntimeError, match='neither warmup_ratio nor warmup_steps'):
-        training_arguments_kwargs(config, 'lora', tmp_path, 42, None, 2, True, False, api)
-
-
-def test_trainer_constructor_v4_v5():
-    v4 = _fake_class_with_signature(['model','args','train_dataset','tokenizer'])
-    v5 = _fake_class_with_signature(['model','args','train_dataset','processing_class'])
-    marker=object()
-    assert trainer_processing_arg(v4,marker) == {'tokenizer':marker}
-    assert trainer_processing_arg(v5,marker) == {'processing_class':marker}
-
-
-def test_trainer_constructor_unknown_raises():
-    impossible = _fake_class_with_signature(['model'])
+def test_trainer_processing_class_native5():
+    version5 = _fake_class_with_signature(['model','args','train_dataset','processing_class'])
+    version4 = _fake_class_with_signature(['model','args','train_dataset','tokenizer'])
+    marker = object()
+    assert trainer_processing_arg(version5, marker) == {'processing_class':marker}
     with pytest.raises(RuntimeError, match='processing_class'):
-        trainer_processing_arg(impossible,None)
+        trainer_processing_arg(version4, marker)
+
+
+def test_batch_encoding_mapping_is_flat_numeric():
+    class FakeBatchEncoding(dict):
+        pass
+    ids = numeric_token_ids(FakeBatchEncoding({'input_ids': [[11,22,33]], 'attention_mask': [[1,1,1]]}))
+    assert ids == [11,22,33]
+    assert numeric_token_ids(torch.tensor([[5,6]])) == [5,6]
+    with pytest.raises(ValueError, match='non-integer token'):
+        numeric_token_ids(['input_ids','attention_mask',12])
+
+
+def test_supervised_encoder_batchencoding_regression():
+    class EncodingDictTokenizer(ToyChatTokenizer):
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False):
+            output = super().apply_chat_template(messages, tokenize=tokenize,
+                                                add_generation_prompt=add_generation_prompt)
+            if tokenize:
+                return {'input_ids':output, 'attention_mask':[1]*len(output)}
+            return output
+    e = encode_supervised(EncodingDictTokenizer(), 'short source', 'sports',
+                          ['sports','politics'], 'en', 1024)
+    assert all(isinstance(i,int) for i in e['input_ids'])
+    assert 'sports' in EncodingDictTokenizer().decode([x for x in e['labels'] if x != -100])
+
+
+def test_collator_rejects_non_numeric_early():
+    tok = type('Tokenizer',(),{'pad_token_id':0,'eos_token_id':2})()
+    with pytest.raises(ValueError, match='non-integer token'):
+        supervised_collator(tok)([{'input_ids':['input_ids',3],
+                                    'attention_mask':[1,1], 'labels':[-100,3]}])
+
+
+def test_inference_mapping_and_tensor(monkeypatch):
+    class Model:
+        def __init__(self): self.p = torch.nn.Parameter(torch.tensor([1.]))
+        def parameters(self): return iter([self.p])
+        def generate(self, input_ids, attention_mask, **kwargs):
+            assert input_ids.shape == attention_mask.shape
+            return torch.cat([input_ids,torch.tensor([[ord(x) for x in 'sports']],device=input_ids.device)],dim=1)
+    class Tok(ToyChatTokenizer):
+        pad_token_id = 0
+        eos_token_id = 2
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False, return_tensors=None):
+            raw=super().apply_chat_template(messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt)
+            if tokenize and return_tensors:
+                return {'input_ids':torch.tensor([raw]), 'attention_mask':torch.ones((1,len(raw)),dtype=torch.long)}
+            return raw
+    row={'text':'test','label':'sports'}
+    result=run_generation(Model(),Tok(),row,['sports','politics'])
+    assert result['prediction']=='sports' and result['valid']
+
+
+def test_requirements_record_preinstalled_versions():
+    root=Path(__file__).resolve().parents[1]
+    content=(root/'requirements.txt').read_text()
+    assert 'transformers==5.16.1' in content
+    assert 'peft==0.20.0' in content
+    assert 'numpy==2.1.3' in content
+    assert 'do NOT pip install' in content
+
+
+def test_no_notebook_performs_package_installations():
+    root=Path(__file__).resolve().parents[1]
+    notebooks=sorted((root/'notebooks').glob('*.ipynb'))
+    assert len(notebooks)==13
+    for f in notebooks:
+        data=json.loads(f.read_text())
+        setup=''.join(data['cells'][1]['source'])
+        assert 'EXPECTED' in setup and '5.16.1' in setup, f.name
+        assert 'pip", "install' not in setup, f.name
+        assert 'pip install' not in setup, f.name
+        assert 'check_training_api()' in setup, f.name

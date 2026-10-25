@@ -1,3 +1,26 @@
+# Kaggle-native 2026 version — START HERE
+
+This release targets the preinstalled Kaggle stack (Python 3.13.15, PyTorch 2.11.0+cu128,
+Transformers 5.16.1, PEFT 0.20.0). **Do not run `pip install -r requirements.txt`**.
+Each of the 13 notebooks begins with Git clone/import/version checks and makes no environment changes.
+
+**Important:** Update your GitHub repository using this ZIP, then launch one of the updated notebooks.
+An old first cell will try to downgrade libraries and undo this fix. Restart the Kaggle session
+if packages were previously replaced. Start with notebook `00_environment_and_pilot.ipynb`.
+
+**Recommended order:** 00 setup + unit tests + model smoke (without GPU pilot) →
+01 data preparation → 00 two-step GPU pilot → 02 baselines → 03 LoRA → 04 full
+→ 05 inference → 06 metrics → 07 analysis; optional 08–12 afterward.
+
+**Results are not included:** Models and GPU training cannot be executed in this offline environment.
+The `check_training_api` preflight instantiates real `TrainingArguments` without downloading Qwen.
+Full end-to-end verification requires Kaggle GPU runs.
+
+**Reproducibility:** Saved run metadata includes the Python package versions and the dataset
+file SHA. Changing package versions in the middle of an experiment invalidates strict run comparison.
+
+---
+
 # Urdu Small-LLM Research: LoRA vs Full Fine-Tuning
 
 **Project:** Efficient Urdu Adaptation of a Small LLM: LoRA vs Full Fine-Tuning, Data Efficiency and English Retention
@@ -70,9 +93,10 @@ You do **not** need to upload the project files again.
 
 ### Recommended notebook order
 
-1. Run notebook **00**, then notebook **01** to prepare the dataset.
-2. In notebook 00, set `INSTALL_PACKAGES=True` once if missing packages are found;
-   restart the kernel after installation.
+1. Run notebook **00** for environment checks and offline tests, then notebook **01** to prepare the dataset.
+2. Do **not** install or downgrade any packages. The first cell verifies the
+   working Kaggle libraries you reported. If it fails, inspect the environment
+   instead of using pip during a live session.
 3. After preprocessing, run the optional GPU pilot in notebook 00; test LoRA first,
    then full tuning to check memory and timing.
 4. Then run **02 → 03 → 04 → 05 → 06 → 07**. Other notebooks are optional.

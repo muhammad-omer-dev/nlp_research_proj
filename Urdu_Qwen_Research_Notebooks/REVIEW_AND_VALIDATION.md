@@ -1,4 +1,4 @@
-# Review and validation — 24 October 2026
+# Review and validation — Kaggle-native revision, 25 October 2026
 
 ## Verified locally
 
@@ -23,7 +23,7 @@
 
 ## Remaining checks requiring actual Kaggle/Colab GPU
 
-- Install pinned Hugging Face library versions on the hosted CUDA-PyTorch environment.
+- The Kaggle native Python 3.13 / Transformers 5.16.1 / PEFT 0.20.0 / PyTorch 2.11 CUDA stack is used **without pip installation**. Actual constructor/import and GPU smoke tests must run on Kaggle.
 - Download and load Qwen2.5-0.5B-Instruct and both SIB-200 language configurations.
 - Verify the real Qwen chat tokenizer aligns prompt and assistant labels.
 - Run LoRA and full 2-step pilots with real CUDA memory measurements; check precision/optimizer compatibility.
@@ -38,3 +38,16 @@
 All 13 notebooks now load the project from `https://github.com/muhammad-omer-dev/nlp_research_proj.git` with a clone-if-missing first code cell. Existing clones are reused; optional fast-forward with `PULL_LATEST=True`. The known repository nesting is `nlp_research_proj/Urdu_Qwen_Research_Notebooks`. The notebook generators were updated to preserve this first cell when notebooks are rebuilt.
 
 This update was tested for notebook syntax and with an isolated local `git` repository, but Kaggle/Colab network/GPU training was not run in this container.
+
+
+## Updates in the Kaggle-native release
+
+- Removed pip installation from the first cell in all 13 notebooks.
+- TrainingArguments uses Transformers 5 names: `warmup_steps`, `train_sampling_strategy`, `eval_strategy`, and `gradient_checkpointing_kwargs`.
+- Trainer uses `processing_class`.
+- Model loading uses `dtype` rather than `torch_dtype`.
+- Both training and inference now normalize mapping-based tokenizer outputs to numeric token IDs.
+- Added strict collator validation for string-valued or misaligned IDs.
+- Added environment-version metadata to training runs for reproducibility.
+- Existing offline tests were updated to target Transformers 5, rather than testing old 4.x APIs.
+- Complete model downloads, Trainer/PEFT integration with the real Kaggle CUDA runtime, and GPU training have **not** run in this environment.

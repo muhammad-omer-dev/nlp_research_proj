@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -198,6 +199,28 @@ def messages_for(text, labels, lang="ur", demonstrations=None):
     return messages
 
 
+def numeric_token_ids(value, context="token IDs"):
+    """Convert list, tensor or Hugging Face BatchEncoding to a flat list of ints.
+
+    Important: list(BatchEncoding) returns string KEY names, not token values.
+    """
+    if isinstance(value, Mapping):
+        if "input_ids" not in value:
+            raise ValueError(f"{context}: dictionary has no input_ids")
+        value = value["input_ids"]
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], (list, tuple)):
+        value = value[0]
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{context}: expected a sequence of integers, got {type(value).__name__}")
+    if any(isinstance(x, bool) or not isinstance(x, int) for x in value):
+        invalid = next(((i, repr(x)) for i, x in enumerate(value)
+                        if isinstance(x, bool) or not isinstance(x, int)), None)
+        raise ValueError(f"{context}: non-integer token at position {invalid[0]}: {invalid[1]}")
+    return list(value)
+
+
 def encode_supervised(tokenizer, text, label, labels, lang="ur", max_length=256):
     """Chat-template aligned, assistant-only loss. Shortens INPUT TEXT, never target.
 
@@ -210,14 +233,10 @@ def encode_supervised(tokenizer, text, label, labels, lang="ur", max_length=256)
         # Tokenizing a completed conversation separately can merge BPE tokens
         # across the prompt/answer boundary, so its token IDs do not have to
         # start with the independently tokenized generation prompt.
-        prefix_ids = tokenizer.apply_chat_template(
-            prompt, tokenize=True, add_generation_prompt=True
+        prefix_ids = numeric_token_ids(
+            tokenizer.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True),
+            context="chat prompt input_ids"
         )
-        if isinstance(prefix_ids, dict):
-            prefix_ids = prefix_ids["input_ids"]
-        if hasattr(prefix_ids, "tolist"):
-            prefix_ids = prefix_ids.tolist()
-        prefix_ids = list(prefix_ids)
 
         prefix_text = tokenizer.apply_chat_template(
             prompt, tokenize=False, add_generation_prompt=True
@@ -242,15 +261,18 @@ def encode_supervised(tokenizer, text, label, labels, lang="ur", max_length=256)
         # No extra BOS/EOS: chat templates already provide end-of-turn tokens.
         # Concatenating independently tokenized pieces preserves the generation
         # prompt prefix and allows a precise assistant-only loss mask.
-        suffix_ids = tokenizer.encode(suffix_text, add_special_tokens=False)
-        if hasattr(suffix_ids, "tolist"):
-            suffix_ids = suffix_ids.tolist()
-        suffix_ids = list(suffix_ids)
+        suffix_ids = numeric_token_ids(
+            tokenizer.encode(suffix_text, add_special_tokens=False),
+            context="assistant response input_ids"
+        )
         if not suffix_ids:
             raise ValueError("Chat template generated no response tokens")
         return prefix_ids, prefix_ids + suffix_ids
 
-    original_tokens = tokenizer.encode(str(text), add_special_tokens=False)
+    original_tokens = numeric_token_ids(
+        tokenizer.encode(str(text), add_special_tokens=False),
+        context="source text input_ids"
+    )
     prefix, full = encode_text(str(text))
     kept = len(original_tokens)
     if len(full) > max_length:
@@ -276,19 +298,33 @@ def encode_supervised(tokenizer, text, label, labels, lang="ur", max_length=256)
 
 
 def supervised_collator(tokenizer):
-    """Dynamic right padding; output is ready for CausalLM loss."""
+    """Pad variable length sequences; prompt and padding positions have loss -100."""
     def collate(batch):
         import torch
+        if not batch:
+            raise ValueError("Cannot collate an empty batch")
         width = max(len(x["input_ids"]) for x in batch)
         pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        if pad is None:
+            raise ValueError("Tokenizer has no pad or EOS token")
         ids, attn, labs = [], [], []
-        for b in batch:
-            extra = width - len(b["input_ids"])
-            ids.append(b["input_ids"] + [pad] * extra)
-            attn.append(b["attention_mask"] + [0] * extra)
-            labs.append(b["labels"] + [-100] * extra)
-        return {"input_ids": torch.tensor(ids), "attention_mask": torch.tensor(attn), "labels": torch.tensor(labs)}
+        for index, b in enumerate(batch):
+            cur_ids = numeric_token_ids(b["input_ids"], f"row {index} input_ids")
+            cur_attn = numeric_token_ids(b["attention_mask"], f"row {index} attention_mask")
+            cur_labels = numeric_token_ids(b["labels"], f"row {index} labels")
+            if not (len(cur_ids) == len(cur_attn) == len(cur_labels)):
+                raise ValueError(f"Row {index}: token, attention and label lengths differ")
+            if not any(x != -100 for x in cur_labels):
+                raise ValueError(f"Row {index}: no supervised answer tokens")
+            extra = width - len(cur_ids)
+            ids.append(cur_ids + [pad] * extra)
+            attn.append(cur_attn + [0] * extra)
+            labs.append(cur_labels + [-100] * extra)
+        return {"input_ids": torch.tensor(ids, dtype=torch.long),
+                "attention_mask": torch.tensor(attn, dtype=torch.long),
+                "labels": torch.tensor(labs, dtype=torch.long)}
     return collate
+
 
 
 def load_model(model_id, adapter_path=None, train_mode=False):
@@ -296,7 +332,7 @@ def load_model(model_id, adapter_path=None, train_mode=False):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     if tokenizer.pad_token_id is None: tokenizer.pad_token = tokenizer.eos_token
-    kw = {"torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32}
+    kw = {"dtype": torch.float16 if torch.cuda.is_available() else torch.float32}
     model = AutoModelForCausalLM.from_pretrained(model_id, **kw)
     if adapter_path:
         from peft import PeftModel
@@ -309,21 +345,29 @@ def load_model(model_id, adapter_path=None, train_mode=False):
 
 
 def run_generation(model, tokenizer, row, labels, lang="ur", demonstrations=None, max_new_tokens=16):
+    """Generate a single class label using exactly the prompt used during training."""
     import torch
     prompt = messages_for(row["text"], labels, lang, demonstrations)
-    encoded = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True, return_tensors="pt")
-    if isinstance(encoded, Mapping): encoded = encoded["input_ids"]
+    encoded = tokenizer.apply_chat_template(prompt, add_generation_prompt=True,
+                                           tokenize=True, return_tensors="pt")
+    ids = numeric_token_ids(encoded, context="inference chat input_ids")
+    if not ids:
+        raise ValueError("Chat template returned no inference tokens")
     model_device = next(model.parameters()).device
-    encoded = encoded.to(model_device)
+    tokens = torch.tensor([ids], dtype=torch.long, device=model_device)
+    mask = torch.ones_like(tokens)
     start = time.perf_counter()
     with torch.inference_mode():
-        result = model.generate(input_ids=encoded, max_new_tokens=max_new_tokens, do_sample=False,
-                                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        result = model.generate(input_ids=tokens, attention_mask=mask,
+                                max_new_tokens=max_new_tokens, do_sample=False,
+                                pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
                                 eos_token_id=tokenizer.eos_token_id)
-    decoded = tokenizer.decode(result[0][encoded.shape[1]:], skip_special_tokens=True).strip()
+    decoded = tokenizer.decode(result[0][tokens.shape[1]:], skip_special_tokens=True).strip()
     seconds = time.perf_counter() - start
     label = normalize_label(decoded, labels)
-    return {"raw_prediction": decoded, "prediction": label or "", "valid": bool(label), "seconds": round(seconds, 5)}
+    return {"raw_prediction": decoded, "prediction": label or "", "valid": bool(label),
+            "seconds": round(seconds, 5)}
+
 
 
 def evaluate_predictions(rows, predictions, labels):
@@ -360,16 +404,16 @@ def tokenize_dataset(rows, tokenizer, labels, lang, max_length):
 
 def training_arguments_kwargs(c, method, out, seed, epochs, max_steps, pilot, has_cuda,
                               training_args_class=None):
-    """Build training arguments for Transformers 4.x or 5.x, with strict API checking.
+    """TrainingArguments for Kaggle's installed Transformers 5.x API.
 
-    Version 5 changed overwrite_output_dir, sampling, and warmup options.
-    Preserve warmup as a 3% ratio across supported versions; do not silently
-    drop options if an API signature changes.
+    No historical 4.x kwargs. Check the signature before creating or loading a model.
     """
     import inspect
     if training_args_class is None:
         from transformers import TrainingArguments as training_args_class
     supported = set(inspect.signature(training_args_class).parameters)
+    if method not in ("lora", "full"):
+        raise ValueError(f"Unknown training method: {method}")
     options = {
         "output_dir": str(out),
         "num_train_epochs": epochs if epochs is not None else c["train_epochs"],
@@ -380,91 +424,70 @@ def training_arguments_kwargs(c, method, out, seed, epochs, max_steps, pilot, ha
         "learning_rate": c["learning_rate_lora"] if method == "lora" else c["learning_rate_full"],
         "optim": c["optimizer"],
         "max_grad_norm": c["max_grad_norm"],
-        "fp16": bool(has_cuda),
-        "bf16": False,
+        "fp16": bool(has_cuda), "bf16": False,
         "gradient_checkpointing": True,
+        "gradient_checkpointing_kwargs": {"use_reentrant": False},
         "save_strategy": "no" if pilot else "steps",
-        "save_steps": 10,
-        "save_total_limit": 1,
+        "save_steps": 10, "save_total_limit": 1,
         "logging_steps": 1 if pilot else 10,
-        "dataloader_num_workers": 0,
-        "remove_unused_columns": False,
-        "report_to": "none",
-        "seed": seed,
-        "data_seed": seed,
-        "lr_scheduler_type": "linear",
+        "dataloader_num_workers": 0, "remove_unused_columns": False,
+        "report_to": "none", "seed": seed, "data_seed": seed,
+        "lr_scheduler_type": "linear", "warmup_steps": 0.03,
+        "eval_strategy": "no", "train_sampling_strategy": "random",
         "ddp_find_unused_parameters": False,
     }
-    # Transformers 4.x uses warmup_ratio. Newer Transformers 5.x releases
-    # removed it and accept a fractional warmup_steps (e.g., 0.03 = 3%).
-    # Keep the *same scheduler behavior* rather than skipping warmup.
-    if "warmup_ratio" in supported:
-        options["warmup_ratio"] = 0.03
-    elif "warmup_steps" in supported:
-        options["warmup_steps"] = 0.03
-    else:
+    missing = sorted(set(options) - supported)
+    if missing:
         raise RuntimeError(
-            "TrainingArguments has neither warmup_ratio nor warmup_steps; "
-            "check the installed Transformers version."
-        )
-    if "eval_strategy" in supported:
-        options["eval_strategy"] = "no"
-    elif "evaluation_strategy" in supported:
-        options["evaluation_strategy"] = "no"
-    else:
-        raise RuntimeError("TrainingArguments lacks both eval_strategy and evaluation_strategy")
-    if "train_sampling_strategy" in supported:
-        options["train_sampling_strategy"] = "random"  # same as group_by_length=False
-    elif "group_by_length" in supported:
-        options["group_by_length"] = False
-    else:
-        raise RuntimeError("TrainingArguments has no recognized train-sampling argument")
-    invalid = sorted(set(options) - supported)
-    if invalid:
-        raise RuntimeError(
-            "This Transformers version is incompatible with our training options: "
-            + ", ".join(invalid)
-            + ". Install the pinned project requirements or update the compatibility helper."
+            "Installed Transformers API is not the supported 5.x interface; unknown "
+            "TrainingArguments keys: " + ", ".join(missing)
         )
     return options
 
 
 def trainer_processing_arg(trainer_class, tokenizer):
-    """Transformers 5 uses processing_class; older versions may use tokenizer."""
+    """Trainer 5.x uses processing_class, not the removed tokenizer kwarg."""
     import inspect
     supported = inspect.signature(trainer_class).parameters
-    if "processing_class" in supported:
-        return {"processing_class": tokenizer}
-    if "tokenizer" in supported:
-        return {"tokenizer": tokenizer}
-    raise RuntimeError("Trainer constructor lacks processing_class and tokenizer")
+    if "processing_class" not in supported:
+        raise RuntimeError("Installed Trainer lacks processing_class; need Transformers 5.x")
+    return {"processing_class": tokenizer}
 
 
 def check_training_api():
-    """Validate the installed training API before loading a model or spending GPU time."""
-    import inspect
-    import importlib.metadata
+    """Run a real API constructor/import smoke test before downloading Qwen."""
+    import importlib.metadata as md
+    import sys
+    import torch
     import transformers
+    import peft
     from transformers import TrainingArguments, Trainer
-    from peft import LoraConfig, get_peft_model
-    args = training_arguments_kwargs(cfg(), "lora", ROOT / "outputs" / "api_check",
-                                     seed=42, epochs=1, max_steps=2, pilot=True,
-                                     has_cuda=False, training_args_class=TrainingArguments)
-    trainer_param = next(iter(trainer_processing_arg(Trainer, None)))
-    report = {
-        "transformers": transformers.__version__,
-        "peft": importlib.metadata.version("peft"),
-        "training_arguments": sorted(args),
-        "sampling_key": "train_sampling_strategy" if "train_sampling_strategy" in args else "group_by_length",
-        "trainer_tokenizer_key": trainer_param,
+    from peft import LoraConfig, TaskType, get_peft_model
+    from packaging.version import Version
+    if not sys.version_info[:2] == (3,13):
+        print("Notice: project was prepared on Kaggle Python 3.13; current:", sys.version.split()[0])
+    if Version(transformers.__version__).major != 5:
+        raise RuntimeError("This project targets preinstalled Transformers 5.x, found " + transformers.__version__)
+    if Version(peft.__version__) < Version("0.20"):
+        raise RuntimeError("This project needs PEFT >=0.20, found " + peft.__version__)
+    options = training_arguments_kwargs(cfg(), "lora", ROOT / "outputs" / "api_check",
+                                         seed=42, epochs=1, max_steps=2, pilot=True,
+                                         has_cuda=torch.cuda.is_available(),
+                                         training_args_class=TrainingArguments)
+    args = TrainingArguments(**options)
+    processing_key = next(iter(trainer_processing_arg(Trainer, None)))
+    return {
+        "python": sys.version.split()[0],
+        "torch": torch.__version__, "cuda": torch.cuda.is_available(),
+        "transformers": transformers.__version__, "peft": peft.__version__,
+        "accelerate": md.version("accelerate"),
+        "training_arguments": sorted(options),
+        "sampling_key": "train_sampling_strategy",
+        "warmup_key": "warmup_steps",
+        "trainer_tokenizer_key": processing_key,
+        "optim": str(args.optim),
     }
-    try:
-        report["torchao"] = importlib.metadata.version("torchao")
-    except importlib.metadata.PackageNotFoundError:
-        report["torchao"] = "not installed"
-    if report["torchao"] != "not installed":
-        print("Warning: torchao is installed. Earlier environments had a PEFT/torchao conflict.")
-    return report
+
 
 
 def train_run(method, task, size, seed, run_name=None, lang="ur", rank=8,
@@ -488,7 +511,10 @@ def train_run(method, task, size, seed, run_name=None, lang="ur", rank=8,
     out = ROOT / "outputs" / ("pilots" if pilot else "checkpoints") / safe_name
     if (out / "complete.json").exists():
         raise FileExistsError(f"Existing finished run, refusing to overwrite: {out}")
-    spec = {"method":method,"task":task,"size":size,"seed":seed,"lang":lang,"rank":rank,
+    from importlib import metadata as package_metadata
+    runtime_versions = {name: package_metadata.version(name) for name in
+                        ("transformers", "peft", "torch", "accelerate")}
+    spec = {"runtime_versions":runtime_versions, "method":method,"task":task,"size":size,"seed":seed,"lang":lang,"rank":rank,
             "model_id":model_id,"config":c,"max_steps":max_steps,"epochs":epochs,
             "train_sha":dataset_sha(task,lang,"train"),
             "val_sha":dataset_sha(task,lang,"validation")}
@@ -510,7 +536,7 @@ def train_run(method, task, size, seed, run_name=None, lang="ur", rank=8,
     if not previous.exists(): write_json(previous,spec)
     model, tokenizer = load_model(model_id, train_mode=True)
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     if method == "lora":
         lora = LoraConfig(r=rank, lora_alpha=c["lora_alpha"], lora_dropout=c["lora_dropout"],
                           target_modules=["q_proj", "v_proj"], bias="none", task_type=TaskType.CAUSAL_LM)
@@ -567,7 +593,8 @@ def train_run(method, task, size, seed, run_name=None, lang="ur", rank=8,
                "wall_seconds_this_session":round(wall_this_session,2),
                "train_csv_sha256":dataset_sha(task, lang, "train"), "val_csv_sha256":dataset_sha(task, lang, "validation"),
                "truncated_training_examples": truncated_train, "source_tokens_removed": removed_train_tokens,
-               "saved_path":str(out / "model"), "pilot":pilot, "config":c}
+               "saved_path":str(out / "model"), "pilot":pilot, "config":c,
+               "runtime_versions": runtime_versions}
     write_json(out / "complete.json", summary)
     append_jsonl(ROOT / "outputs/metrics/train_runs.jsonl", summary)
     del trainer, model
