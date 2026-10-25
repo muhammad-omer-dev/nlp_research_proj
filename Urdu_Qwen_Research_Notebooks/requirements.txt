@@ -1,4 +1,4 @@
-# Urdu Qwen research: ONE tested-API target for Kaggle/Colab (Python 3.10–3.12).
+# Urdu Qwen research: ONE tested-API target for Kaggle/Colab (Python 3.10–3.13 (with version-aware NumPy)).
 # KEEP the platform's CUDA-enabled torch; do NOT pin or reinstall torch here.
 # Do NOT install latest transformers/peft independently; they change APIs.
 # Hugging Face training stack (exact pins):
@@ -12,7 +12,8 @@ safetensors==0.5.3
 # Analysis, tests and notebook libraries:
 scikit-learn==1.6.1
 pandas==2.2.3
-numpy==1.26.4
+numpy==1.26.4; python_version < "3.13"
+numpy==2.2.6; python_version >= "3.13"
 matplotlib==3.10.1
 psutil==7.0.0
 ipywidgets==8.1.6
